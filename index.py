@@ -3,6 +3,7 @@ import requests
 import re
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import os
 
 # Configuration
 API_URL_LOG = "https://security.luova.club/api/log_attack"
