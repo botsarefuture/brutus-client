@@ -84,10 +84,21 @@ def fetch_ips_to_block():
         return []
 
 def block_ips(ips):
-    """Simulate blocking the given IP addresses."""
+    """Blocks the given IP addresses using iptables or firewall commands."""
     for ip in ips:
-        print(f"Blocking IP: {ip}")
-        # Here, you would add the actual blocking mechanism, e.g., iptables or firewall commands.
+        try:
+            # Use iptables to block the IP address
+            block_command = f"iptables -A INPUT -s {ip} -j DROP"
+            unblock_command = f"iptables -D INPUT -s {ip} -j DROP"
+            
+            print(f"Executing: {block_command}")
+            os.system(block_command)  # Execute the block command
+
+            # Optionally, you can log or return the unblock command for later use
+            print(f"To unblock: {unblock_command}")
+            
+        except Exception as e:
+            print(f"Failed to block IP {ip}: {str(e)}")
 
 def monitor_ssh_log():
     """Starts monitoring the SSH log file for brute-force attempts."""
