@@ -7,10 +7,17 @@ SERVICE_NAME="brutus-client"
 PYTHON_BIN="/usr/bin/python3"
 VENV_DIR="$APP_DIR/venv"
 LOG_FILE="/var/log/auth.log"  # Modify based on your system
+CRON_JOB="0 0 * * * /opt/brutus-client/update_brutus_client.sh > /var/log/brutus-client-update.log 2>&1"
 
-# Step 1: Clone the repository
-echo "Cloning the repository..."
-git clone $REPO_URL $APP_DIR
+# Step 1: Clone the repository if it doesn't exist
+if [ ! -d "$APP_DIR" ]; then
+    echo "Cloning the repository..."
+    git clone $REPO_URL $APP_DIR
+else
+    echo "Repository already exists. Pulling latest changes..."
+    cd $APP_DIR
+    git pull origin main
+fi
 
 # Step 2: Set up a virtual environment and install dependencies
 echo "Setting up virtual environment..."
@@ -49,3 +56,8 @@ sudo systemctl start $SERVICE_NAME
 # Step 5: Check the status of the service
 echo "Checking the status of the service..."
 sudo systemctl status $SERVICE_NAME
+
+# Step 6: Create or update the cron job for daily updates
+(crontab -l 2>/dev/null | grep -v -F "$APP_DIR/update_brutus_client.sh"; echo "$CRON_JOB") | crontab -
+
+echo "Cron job for daily updates has been set."
