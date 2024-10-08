@@ -21,7 +21,7 @@ BLOCK_INTERVAL = 60  # Time in seconds to check for IPs to block
 BACKOFF_MAX_TRIES = 5  # Maximum retries for API calls
 FAILED_LOGIN_LIMIT = 1  # Number of failed logins before blocking
 #                 Seconds      Hours                 
-FAILED_LOGIN_WINDOW = 60 * 60 * 24  # Time in seconds to consider for failed logins
+FAILED_LOGIN_WINDOW = 0  # Time in seconds to consider for failed logins
 
 #                          ^
 #                       Minutes
