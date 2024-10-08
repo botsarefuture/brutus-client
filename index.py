@@ -6,25 +6,19 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import os
 import subprocess
-import random
 import backoff
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 # Configuration
-API_URL_LOG = "https://security.luova.club/api/log_attack"
-API_URL_BLOCK = "https://security.luova.club/api/block_list"
+API_URL = "https://security.luova.club/api/log_attack"  # Single API endpoint for reporting attacks
+API_URL_BLOCK = "https://security.luova.club/api/block_list"  # API to fetch IPs to block
 PUBLIC_IP_SERVICE = "https://api.ipify.org"  # Service to fetch public IP
 LOG_FILE_PATH = "/var/log/auth.log"  # Modify depending on your system
-BATCH_SIZE = 10  # Number of attacks to batch before sending to API
 BLOCK_INTERVAL = 60  # Time in seconds to check for IPs to block
 BACKOFF_MAX_TRIES = 5  # Maximum retries for API calls
 FAILED_LOGIN_LIMIT = 1  # Number of failed logins before blocking
-#                 Seconds      Hours                 
 FAILED_LOGIN_WINDOW = 0  # Time in seconds to consider for failed logins
-
-#                          ^
-#                       Minutes
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -36,7 +30,6 @@ class SSHLogHandler(FileSystemEventHandler):
         self.log_file = log_file
         self.server_ip = server_ip
         self.last_position = 0  # Track the last position read in the log file
-        self.attack_batch = []  # List to accumulate attacks
         self.failed_attempts = defaultdict(list)  # Store failed attempts with timestamps
 
     def on_modified(self, event):
@@ -54,10 +47,6 @@ class SSHLogHandler(FileSystemEventHandler):
         for line in new_lines:
             self.process_log_line(line)
 
-        # If we have enough attacks, send them in a batch
-        if len(self.attack_batch) >= BATCH_SIZE:
-            self.report_attacks()
-
     def process_log_line(self, line):
         """Extracts potential brute-force attempts from the log line."""
         failed_login_pattern = r'Failed password for (invalid user )?(\S+) from (\S+)'
@@ -66,7 +55,7 @@ class SSHLogHandler(FileSystemEventHandler):
             username = match.group(2)
             ip_address = match.group(3)
             logging.info(f"Brute-force attempt detected: Username={username}, IP={ip_address}")
-            self.attack_batch.append({"ip_address": ip_address, "username": username})
+            self.report_attack(ip_address, username)
             self.record_failed_attempt(ip_address)
 
     def record_failed_attempt(self, ip_address):
@@ -86,26 +75,22 @@ class SSHLogHandler(FileSystemEventHandler):
             del self.failed_attempts[ip_address]  # Clear the record for the blocked IP
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_tries=BACKOFF_MAX_TRIES)
-    def report_attacks(self):
-        """Sends the accumulated brute-force attempts to the Flask API."""
-        
-        for item in self.attack_batch:
-            payload = {
-                "server_ip": self.server_ip,
-                "ip_address": item.get("ip_address"),
-                "username": item.get("username")
-            }
+    def report_attack(self, ip_address, username):
+        """Sends a brute-force attempt to the Flask API."""
+        payload = {
+            "server_ip": self.server_ip,
+            "ip_address": ip_address,
+            "username": username
+        }
 
-            try:
-                response = requests.post(API_URL_LOG, json=payload)
-                if response.status_code == 200:
-                    logging.info(f"Attacks logged successfully for IPs: {[a['ip_address'] for a in self.attack_batch]}")
-                else:
-                    logging.error(f"Failed to log attacks: {response.text}")
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Error logging attacks: {str(e)}")
-            finally:
-                self.attack_batch.clear()  # Clear the batch after processing
+        try:
+            response = requests.post(API_URL, json=payload)
+            if response.status_code == 200:
+                logging.info(f"Attack logged successfully: {payload}")
+            else:
+                logging.error(f"Failed to log attack: {response.text}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error logging attack: {str(e)}")
 
 def fetch_public_ip():
     """Fetches the public IP address of the server."""
