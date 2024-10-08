@@ -6,14 +6,17 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import os
 import subprocess
+import random
+import backoff
 
 # Configuration
 API_URL_LOG = "https://security.luova.club/api/log_attack"
 API_URL_BLOCK = "https://security.luova.club/api/block_list"
 PUBLIC_IP_SERVICE = "https://api.ipify.org"  # Service to fetch public IP
-LOG_FILE_PATH = "/var/log/auth.log"  # Modify depending on your system (e.g., /var/log/secure on CentOS)
+LOG_FILE_PATH = "/var/log/auth.log"  # Modify depending on your system
 BATCH_SIZE = 10  # Number of attacks to batch before sending to API
 BLOCK_INTERVAL = 60  # Time in seconds to check for IPs to block
+BACKOFF_MAX_TRIES = 5  # Maximum retries for API calls
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -56,50 +59,47 @@ class SSHLogHandler(FileSystemEventHandler):
             logging.info(f"Brute-force attempt detected: Username={username}, IP={ip_address}")
             self.attack_batch.append({"ip_address": ip_address, "username": username})
 
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_tries=BACKOFF_MAX_TRIES)
     def report_attacks(self):
         """Sends the accumulated brute-force attempts to the Flask API."""
         
         for item in self.attack_batch:
             payload = {
-            "server_ip": self.server_ip,
-            "ip_address": item.get("ip_address"),
-            "username": item.get("username")
+                "server_ip": self.server_ip,
+                "ip_address": item.get("ip_address"),
+                "username": item.get("username")
             }
 
             try:
                 response = requests.post(API_URL_LOG, json=payload)
                 if response.status_code == 200:
                     logging.info(f"Attacks logged successfully for IPs: {[a['ip_address'] for a in self.attack_batch]}")
-                    self.attack_batch.clear()  # Clear the batch after successful insert
                 else:
                     logging.error(f"Failed to log attacks: {response.text}")
-            except Exception as e:
+            except requests.exceptions.RequestException as e:
                 logging.error(f"Error logging attacks: {str(e)}")
+            finally:
+                self.attack_batch.clear()  # Clear the batch after processing
 
 def fetch_public_ip():
     """Fetches the public IP address of the server."""
     try:
         response = requests.get(PUBLIC_IP_SERVICE)
-        if response.status_code == 200:
-            return response.text.strip()  # Return the public IP as a string
-        else:
-            logging.error(f"Failed to fetch public IP: {response.text}")
-            return None
-    except Exception as e:
+        response.raise_for_status()  # Raise an error for bad responses
+        return response.text.strip()  # Return the public IP as a string
+    except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching public IP: {str(e)}")
         return None
 
+@backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_tries=BACKOFF_MAX_TRIES)
 def fetch_ips_to_block():
     """Fetches the list of IP addresses that need to be blocked from the Flask API."""
     try:
         response = requests.get(API_URL_BLOCK)
-        if response.status_code == 200:
-            ips_to_block = response.json().get('ips', [])
-            return ips_to_block
-        else:
-            logging.error(f"Failed to fetch IPs to block: {response.text}")
-            return []
-    except Exception as e:
+        response.raise_for_status()
+        ips_to_block = response.json().get('ips', [])
+        return ips_to_block
+    except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching IPs: {str(e)}")
         return []
 
@@ -113,6 +113,8 @@ def block_ips(ips):
             subprocess.run(block_command, shell=True, check=True)
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to block IP {ip}: {str(e)}")
+        except Exception as e:
+            logging.error(f"Unexpected error when blocking IP {ip}: {str(e)}")
 
 def monitor_ssh_log():
     """Starts monitoring the SSH log file for brute-force attempts."""
@@ -139,7 +141,10 @@ def monitor_ssh_log():
             time.sleep(BLOCK_INTERVAL)  # Check for IPs to block every minute
     except KeyboardInterrupt:
         observer.stop()
-    observer.join()
+    except Exception as e:
+        logging.error(f"Unexpected error in monitor loop: {str(e)}")
+    finally:
+        observer.join()
 
 if __name__ == "__main__":
     monitor_ssh_log()
