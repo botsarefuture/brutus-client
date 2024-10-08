@@ -1,15 +1,22 @@
 import time
 import requests
 import re
+import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import os
+import subprocess
 
 # Configuration
 API_URL_LOG = "https://security.luova.club/api/log_attack"
 API_URL_BLOCK = "https://security.luova.club/api/block_list"
 PUBLIC_IP_SERVICE = "https://api.ipify.org"  # Service to fetch public IP
 LOG_FILE_PATH = "/var/log/auth.log"  # Modify depending on your system (e.g., /var/log/secure on CentOS)
+BATCH_SIZE = 10  # Number of attacks to batch before sending to API
+BLOCK_INTERVAL = 60  # Time in seconds to check for IPs to block
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class SSHLogHandler(FileSystemEventHandler):
     """Monitors SSH log files for brute-force attempts and reports them to a central API."""
@@ -17,19 +24,27 @@ class SSHLogHandler(FileSystemEventHandler):
     def __init__(self, log_file, server_ip):
         self.log_file = log_file
         self.server_ip = server_ip
-        self._seek_to_end()
-
-    def _seek_to_end(self):
-        """Move the file pointer to the end of the file to start tailing."""
-        with open(self.log_file, 'r') as f:
-            f.seek(0, 2)
+        self.last_position = 0  # Track the last position read in the log file
+        self.attack_batch = []  # List to accumulate attacks
 
     def on_modified(self, event):
         """Triggered when the log file is modified."""
         if event.src_path == self.log_file:
-            with open(self.log_file, 'r') as f:
-                for line in f.readlines():
-                    self.process_log_line(line)
+            self.process_new_lines()
+
+    def process_new_lines(self):
+        """Read new lines added to the log file since the last read position."""
+        with open(self.log_file, 'r') as f:
+            f.seek(self.last_position)
+            new_lines = f.readlines()
+            self.last_position = f.tell()  # Update the last position read
+
+        for line in new_lines:
+            self.process_log_line(line)
+
+        # If we have enough attacks, send them in a batch
+        if len(self.attack_batch) >= BATCH_SIZE:
+            self.report_attacks()
 
     def process_log_line(self, line):
         """Extracts potential brute-force attempts from the log line."""
@@ -38,24 +53,28 @@ class SSHLogHandler(FileSystemEventHandler):
         if match:
             username = match.group(2)
             ip_address = match.group(3)
-            print(f"Brute-force attempt detected: Username={username}, IP={ip_address}")
-            self.report_attack(ip_address)
+            logging.info(f"Brute-force attempt detected: Username={username}, IP={ip_address}")
+            self.attack_batch.append({"ip_address": ip_address, "username": username})
 
-    def report_attack(self, ip_address):
-        """Sends the brute-force attempt to the Flask API."""
-        payload = {
+    def report_attacks(self):
+        """Sends the accumulated brute-force attempts to the Flask API."""
+        
+        for item in self.attack_batch:
+            payload = {
             "server_ip": self.server_ip,
-            "ip_address": ip_address,
-            "blocked": False
-        }
-        try:
-            response = requests.post(API_URL_LOG, json=payload)
-            if response.status_code == 200:
-                print(f"Attack logged successfully for IP: {ip_address}")
-            else:
-                print(f"Failed to log attack: {response.text}")
-        except Exception as e:
-            print(f"Error logging attack: {str(e)}")
+            "ip_address": item.get("ip_address"),
+            "username": item.get("username")
+            }
+
+            try:
+                response = requests.post(API_URL_LOG, json=payload)
+                if response.status_code == 200:
+                    logging.info(f"Attacks logged successfully for IPs: {[a['ip_address'] for a in self.attack_batch]}")
+                    self.attack_batch.clear()  # Clear the batch after successful insert
+                else:
+                    logging.error(f"Failed to log attacks: {response.text}")
+            except Exception as e:
+                logging.error(f"Error logging attacks: {str(e)}")
 
 def fetch_public_ip():
     """Fetches the public IP address of the server."""
@@ -64,10 +83,10 @@ def fetch_public_ip():
         if response.status_code == 200:
             return response.text.strip()  # Return the public IP as a string
         else:
-            print(f"Failed to fetch public IP: {response.text}")
+            logging.error(f"Failed to fetch public IP: {response.text}")
             return None
     except Exception as e:
-        print(f"Error fetching public IP: {str(e)}")
+        logging.error(f"Error fetching public IP: {str(e)}")
         return None
 
 def fetch_ips_to_block():
@@ -78,10 +97,10 @@ def fetch_ips_to_block():
             ips_to_block = response.json().get('ips', [])
             return ips_to_block
         else:
-            print(f"Failed to fetch IPs to block: {response.text}")
+            logging.error(f"Failed to fetch IPs to block: {response.text}")
             return []
     except Exception as e:
-        print(f"Error fetching IPs: {str(e)}")
+        logging.error(f"Error fetching IPs: {str(e)}")
         return []
 
 def block_ips(ips):
@@ -90,40 +109,34 @@ def block_ips(ips):
         try:
             # Use iptables to block the IP address
             block_command = f"iptables -A INPUT -s {ip} -j DROP"
-            unblock_command = f"iptables -D INPUT -s {ip} -j DROP"
-            
-            print(f"Executing: {block_command}")
-            os.system(block_command)  # Execute the block command
-
-            # Optionally, you can log or return the unblock command for later use
-            print(f"To unblock: {unblock_command}")
-            
-        except Exception as e:
-            print(f"Failed to block IP {ip}: {str(e)}")
+            logging.info(f"Blocking IP: {ip}")
+            subprocess.run(block_command, shell=True, check=True)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to block IP {ip}: {str(e)}")
 
 def monitor_ssh_log():
     """Starts monitoring the SSH log file for brute-force attempts."""
     log_file_path = LOG_FILE_PATH
     server_ip = fetch_public_ip()  # Fetch the public IP to use as the server IP
     if not server_ip:
-        print("Could not fetch public IP. Exiting...")
+        logging.error("Could not fetch public IP. Exiting...")
         return
 
     event_handler = SSHLogHandler(log_file_path, server_ip)
     observer = Observer()
     observer.schedule(event_handler, path=log_file_path, recursive=False)
     
-    print(f"Monitoring SSH log file: {log_file_path}")
+    logging.info(f"Monitoring SSH log file: {log_file_path}")
     observer.start()
     
     try:
         while True:
-            # Fetch the list of IPs to block every 60 seconds
+            # Fetch the list of IPs to block every BLOCK_INTERVAL seconds
             ips_to_block = fetch_ips_to_block()
             if ips_to_block:
                 block_ips(ips_to_block)
 
-            time.sleep(60)  # Check for IPs to block every minute
+            time.sleep(BLOCK_INTERVAL)  # Check for IPs to block every minute
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
