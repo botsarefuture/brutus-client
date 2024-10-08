@@ -108,7 +108,7 @@ def block_ips(ips):
     for ip in ips:
         try:
             # Use iptables to block the IP address
-            block_command = f"iptables -A INPUT -s {ip} -j DROP"
+            block_command = f"ufw deny from {ip}"
             logging.info(f"Blocking IP: {ip}")
             subprocess.run(block_command, shell=True, check=True)
         except subprocess.CalledProcessError as e:
