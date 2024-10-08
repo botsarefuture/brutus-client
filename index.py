@@ -8,6 +8,8 @@ import os
 import subprocess
 import random
 import backoff
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 # Configuration
 API_URL_LOG = "https://security.luova.club/api/log_attack"
@@ -17,6 +19,12 @@ LOG_FILE_PATH = "/var/log/auth.log"  # Modify depending on your system
 BATCH_SIZE = 10  # Number of attacks to batch before sending to API
 BLOCK_INTERVAL = 60  # Time in seconds to check for IPs to block
 BACKOFF_MAX_TRIES = 5  # Maximum retries for API calls
+FAILED_LOGIN_LIMIT = 1  # Number of failed logins before blocking
+#                 Seconds      Hours                 
+FAILED_LOGIN_WINDOW = 60 * 60 * 24  # Time in seconds to consider for failed logins
+
+#                          ^
+#                       Minutes
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +37,7 @@ class SSHLogHandler(FileSystemEventHandler):
         self.server_ip = server_ip
         self.last_position = 0  # Track the last position read in the log file
         self.attack_batch = []  # List to accumulate attacks
+        self.failed_attempts = defaultdict(list)  # Store failed attempts with timestamps
 
     def on_modified(self, event):
         """Triggered when the log file is modified."""
@@ -58,6 +67,23 @@ class SSHLogHandler(FileSystemEventHandler):
             ip_address = match.group(3)
             logging.info(f"Brute-force attempt detected: Username={username}, IP={ip_address}")
             self.attack_batch.append({"ip_address": ip_address, "username": username})
+            self.record_failed_attempt(ip_address)
+
+    def record_failed_attempt(self, ip_address):
+        """Records the failed login attempt with the current timestamp."""
+        current_time = datetime.now()
+        self.failed_attempts[ip_address].append(current_time)
+        
+        if not FAILED_LOGIN_WINDOW == 0:
+            # Remove attempts that are outside the window
+            self.failed_attempts[ip_address] = [timestamp for timestamp in self.failed_attempts[ip_address]
+                                                if timestamp > current_time - timedelta(seconds=FAILED_LOGIN_WINDOW)]
+
+        # Check if we exceed the failed login limit
+        if len(self.failed_attempts[ip_address]) >= FAILED_LOGIN_LIMIT:
+            logging.info(f"Blocking IP due to excessive failed attempts: {ip_address}")
+            block_ips([ip_address])  # Block the IP immediately
+            del self.failed_attempts[ip_address]  # Clear the record for the blocked IP
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_tries=BACKOFF_MAX_TRIES)
     def report_attacks(self):
